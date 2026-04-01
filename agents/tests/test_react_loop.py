@@ -134,3 +134,4 @@ def test_run_agent_loop_returns_llm_error_reason():
     assert isinstance(result, LoopResult)
     assert result.exit_reason == LoopExitReason.LLM_ERROR
     assert result.iterations == 1
+    assert result.content == "err msg"
