@@ -1,4 +1,3 @@
-import pytest
 from core.react_loop import LoopExitReason, LoopResult
 
 
@@ -26,6 +25,7 @@ def test_loop_result_exit_reason_max_iterations():
     )
     assert result.exit_reason == LoopExitReason.MAX_ITERATIONS
     assert result.iterations == 40
+    assert result.exit_reason == "max_iterations"
 
 
 def test_loop_result_exit_reason_llm_error():
@@ -38,3 +38,4 @@ def test_loop_result_exit_reason_llm_error():
         iterations=1,
     )
     assert result.exit_reason == LoopExitReason.LLM_ERROR
+    assert result.exit_reason == "llm_error"
