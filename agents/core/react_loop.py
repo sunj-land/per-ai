@@ -5,11 +5,29 @@ ReAct 循环模块
 
 import json
 import logging
+from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Dict, List, Optional
 
 from utils.utils import strip_think, extract_think_blocks
 
 logger = logging.getLogger(__name__)
+
+
+class LoopExitReason(str, Enum):
+    DONE           = "done"           # LLM returned no tool calls → clean finish
+    MAX_ITERATIONS = "max_iterations" # hit the iteration cap
+    LLM_ERROR      = "llm_error"      # LLM returned finish_reason == "error"
+
+
+@dataclass
+class LoopResult:
+    content:         str
+    tools_used:      List[str]
+    messages:        List[Dict[str, Any]]
+    reasoning_trace: List[str]
+    exit_reason:     LoopExitReason
+    iterations:      int
 
 
 async def run_agent_loop(
