@@ -32,7 +32,7 @@ def test_resolve_explicit_purpose():
 
 def test_resolve_keyword_infer():
     router = make_router()
-    result = asyncio.run(router.resolve("帮我总结这篇文章", {}))
+    result = asyncio.run(router.resolve("帮我总结一下这段内容", {}))
     assert result.target_agent == "text_agent"
     assert result.source == "purpose_inferred"
 
@@ -62,7 +62,7 @@ def test_resolve_llm_infer_high_confidence():
     mock_resp.content = '{"purpose": "data_analysis", "confidence": 0.95}'
     router._llm.chat_with_retry = AsyncMock(return_value=mock_resp)
 
-    result = asyncio.run(router.resolve("analyze this dataset", {}))
+    result = asyncio.run(router.resolve("what insights can you provide", {}))
     assert result.target_agent == "data_agent"
     assert result.source == "purpose_inferred_llm"
     assert result.confidence == pytest.approx(0.95)
