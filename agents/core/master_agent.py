@@ -7,7 +7,7 @@ import logging
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from core.monitor import AgentMonitor
 from core.protocol import AgentRequest, AgentResponse
@@ -16,8 +16,8 @@ from core.session import SessionManager, Session
 from core.context import ContextBuilder
 from core.memory import MemoryConsolidator
 from core.registry import ToolRegistry
-from core.router import AgentRouter
-from core.react_loop import run_agent_loop
+from core.router import AgentRouter, RouteResult
+from core.react_loop import run_agent_loop, LoopResult, LoopExitReason
 from tools.filesystem import ReadFileTool, WriteFileTool, EditFileTool, ListDirTool
 from utils.utils import ensure_dir
 
@@ -71,94 +71,33 @@ class MasterAgent:
         self.tools.register(EditFileTool(workspace=self.workspace))
         self.tools.register(ListDirTool(workspace=self.workspace))
 
+    # ------------------------------------------------------------------ #
+    # Public entry point                                                    #
+    # ------------------------------------------------------------------ #
+
     async def process_request(self, request: AgentRequest) -> AgentResponse:
         """
         处理统一的 Agent 请求。
 
         流程：
-          1. 获取或创建会话
-          2. 构建消息上下文
-          3. 尝试路由到子 Agent（快速匹配 → LLM 推断）
-          4. 若无路由命中，执行 MasterAgent 自身的 ReAct 循环
-          5. 持久化新产生的对话轮次
+          1. 建立会话并构建初始消息上下文
+          2. 尝试路由到子 Agent（策略链：显式指定 → purpose → 关键词 → LLM 推断）
+          3. 若路由命中，委托子 Agent 处理
+          4. 否则，执行 MasterAgent 自身的 ReAct 循环
+          5. 持久化对话并返回响应
         """
         start_time = time.time()
         try:
-            # 1. 会话
-            session = self.session_manager.get_or_create(str(request.session_id))
-            session.add_message("user", request.query)
+            session, messages = self._setup_session(request)
+            route = await self._route_request(request)
 
-            # 2. 构建初始消息列表
-            all_history = session.get_history()
-            initial_messages = self.context.build_messages(
-                history=all_history[:-1],
-                current_message=request.query,
-                channel="master",
-                chat_id=request.session_id,
-            )
-            self._inject_reasoning_prompt(initial_messages)
+            if route.target_agent:
+                response = await self._delegate_to_agent(request, session, route, start_time)
+                if response is not None:
+                    return response
 
-            # 3. 路由解析（同步快速匹配）
-            target_agent, route_source, resolved_purpose = self.router.resolve_route_target(
-                request.query, request.parameters
-            )
-            resolved_confidence: Optional[float] = None
-
-            # 4. 若快速匹配无结果，尝试 LLM 推断
-            if not target_agent:
-                inferred = await self.router.infer_purpose_with_llm(
-                    request.query, request.parameters
-                )
-                if inferred:
-                    from core.router import _PURPOSE_AGENT_MAP
-                    target_agent = _PURPOSE_AGENT_MAP[inferred["purpose"]]
-                    route_source = "purpose_inferred_llm"
-                    resolved_purpose = inferred["purpose"]
-                    resolved_confidence = inferred["confidence"]
-
-            # 5. 委托给子 Agent
-            if target_agent:
-                routed = await self._delegate_to_agent(
-                    request, session, target_agent,
-                    route_source, resolved_purpose, resolved_confidence, start_time,
-                )
-                if routed is not None:
-                    return routed
-
-            # 6. MasterAgent 自身 ReAct 循环
-            effective_model = (
-                request.parameters.get("model_version")
-                if isinstance(request.parameters, dict) else None
-            ) or self.model_name
-
-            loop_result = await run_agent_loop(
-                initial_messages,
-                llm=self.llm,
-                tools=self.tools,
-                context=self.context,
-                model=effective_model,
-                max_iterations=self.max_iterations,
-            )
-
-            # 7. 持久化新产生的对话轮次
-            for msg in loop_result.messages[len(initial_messages):]:
-                if "timestamp" not in msg:
-                    msg["timestamp"] = time.strftime("%Y-%m-%dT%H:%M:%S")
-                session.messages.append(msg)
-            session.updated_at = datetime.now()
-            self.session_manager.save(session)
-
-            return AgentResponse(
-                answer=loop_result.content or "No response generated.",
-                source_agent="master_agent",
-                latency_ms=(time.time() - start_time) * 1000,
-                metadata={
-                    "tools_used": loop_result.tools_used,
-                    "iteration_count": loop_result.iterations,
-                    "reasoning_trace": loop_result.reasoning_trace,
-                    "exit_reason": loop_result.exit_reason,
-                },
-            )
+            loop_result = await self._run_react_loop(request, messages)
+            return self._persist_and_respond(request, session, loop_result, start_time)
 
         except Exception as e:
             logger.error("MasterAgent process failed: %s", e, exc_info=True)
@@ -169,24 +108,91 @@ class MasterAgent:
                 error=str(e),
             )
 
+    # ------------------------------------------------------------------ #
+    # Private helpers                                                        #
+    # ------------------------------------------------------------------ #
+
+    def _setup_session(
+        self, request: AgentRequest
+    ) -> Tuple[Session, List[Dict[str, Any]]]:
+        """获取/创建会话，追加用户消息，构建并返回初始消息列表。"""
+        session = self.session_manager.get_or_create(str(request.session_id))
+        session.add_message("user", request.query)
+
+        all_history = session.get_history()
+        messages = self.context.build_messages(
+            history=all_history[:-1],
+            current_message=request.query,
+            channel="master",
+            chat_id=request.session_id,
+        )
+        self._inject_reasoning_prompt(messages)
+        return session, messages
+
+    async def _route_request(self, request: AgentRequest) -> RouteResult:
+        """通过策略链确定目标子 Agent。"""
+        return await self.router.resolve(request.query, request.parameters)
+
+    async def _run_react_loop(
+        self, request: AgentRequest, messages: List[Dict[str, Any]]
+    ) -> LoopResult:
+        """解析有效模型并执行 ReAct 循环，返回 LoopResult。"""
+        effective_model = (
+            request.parameters.get("model_version")
+            if isinstance(request.parameters, dict) else None
+        ) or self.model_name
+
+        return await run_agent_loop(
+            messages,
+            llm=self.llm,
+            tools=self.tools,
+            context=self.context,
+            model=effective_model,
+            max_iterations=self.max_iterations,
+        )
+
+    def _persist_and_respond(
+        self,
+        request: AgentRequest,
+        session: Session,
+        loop_result: LoopResult,
+        start_time: float,
+    ) -> AgentResponse:
+        """将 ReAct 循环产生的新消息写入会话并构建标准响应。"""
+        for msg in loop_result.messages:
+            if "timestamp" not in msg:
+                msg["timestamp"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+            session.messages.append(msg)
+        session.updated_at = datetime.now()
+        self.session_manager.save(session)
+
+        return AgentResponse(
+            answer=loop_result.content or "No response generated.",
+            source_agent="master_agent",
+            latency_ms=(time.time() - start_time) * 1000,
+            metadata={
+                "tools_used": loop_result.tools_used,
+                "iteration_count": loop_result.iterations,
+                "exit_reason": loop_result.exit_reason.value,
+                "reasoning_trace": loop_result.reasoning_trace,
+            },
+        )
+
     async def _delegate_to_agent(
         self,
         request: AgentRequest,
         session: Session,
-        target_agent: str,
-        route_source: Optional[str],
-        resolved_purpose: Optional[str],
-        resolved_confidence: Optional[float],
+        route: RouteResult,
         start_time: float,
     ) -> Optional[AgentResponse]:
         """将请求委托给子 Agent 并返回标准响应。委托失败时返回 None，让调用方回退到 ReAct 循环。"""
         try:
-            agent_instance = self.router.get_or_create_agent(target_agent)
+            agent_instance = self.router.get_or_create_agent(route.target_agent)
             if agent_instance is None:
-                logger.warning("Delegated agent not found: %s", target_agent)
+                logger.warning("Delegated agent not found: %s", route.target_agent)
                 return None
 
-            task = self.router.build_task_for_agent(target_agent, request)
+            task = self.router.build_task_for_agent(route.target_agent, request)
             result = await agent_instance.execute(task)
             answer = self.router.extract_answer_from_agent_result(result) or "No response generated."
 
@@ -194,28 +200,28 @@ class MasterAgent:
             session.updated_at = datetime.now()
             self.session_manager.save(session)
 
-            purpose = resolved_purpose or (
+            purpose = route.purpose or (
                 request.parameters.get("purpose")
                 if isinstance(request.parameters, dict) else None
             )
             return AgentResponse(
                 answer=answer,
-                source_agent=target_agent,
+                source_agent=route.target_agent,
                 latency_ms=(time.time() - start_time) * 1000,
                 metadata={
                     "routing": {
                         "mode": "delegated_agent",
-                        "source": route_source,
-                        "target_agent": target_agent,
+                        "source": route.source,
+                        "target_agent": route.target_agent,
                         "purpose": purpose,
-                        "confidence": resolved_confidence,
+                        "confidence": route.confidence,
                     },
                     "delegated_task": task,
                     "delegated_result": result,
                 },
             )
         except Exception as exc:
-            logger.error("Delegation failed for %s: %s", target_agent, exc, exc_info=True)
+            logger.error("Delegation failed for %s: %s", route.target_agent, exc, exc_info=True)
             return None
 
     @staticmethod
