@@ -6,7 +6,6 @@ import { mount } from "@vue/test-utils";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { createRouter, createWebHistory } from "vue-router";
 import App from "./src/App.vue";
-console.log("aaa")
 const router = createRouter({
 	history: createWebHistory(),
 	routes: [{ path: "/", component: { template: "<div>Home</div>" } }],

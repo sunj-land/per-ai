@@ -4,6 +4,7 @@ Agent 路由器模块
 """
 import json
 import logging
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from utils.utils import parse_json_object
@@ -37,6 +38,14 @@ _PURPOSE_CLASSIFICATION_PROMPT = (
 )
 
 
+@dataclass
+class RouteResult:
+    target_agent: Optional[str]
+    source:       Optional[str]
+    purpose:      Optional[str]
+    confidence:   Optional[float]
+
+
 class AgentRouter:
     """
     Agent 路由器。
@@ -54,6 +63,75 @@ class AgentRouter:
         self._llm = llm
         self._model_name = model_name
         self._agent_cache: Dict[str, Any] = {}
+        self._strategies: list = [
+            self._strategy_explicit_agent,
+            self._strategy_explicit_purpose,
+            self._strategy_keyword_infer,
+            self._strategy_llm_infer,
+        ]
+
+    # ------------------------------------------------------------------ #
+    # Strategy-based resolution                                              #
+    # ------------------------------------------------------------------ #
+
+    async def resolve(self, query: str, parameters: Optional[Dict[str, Any]]) -> RouteResult:
+        """Run strategies in priority order, return first hit. Falls through to empty RouteResult."""
+        for strategy in self._strategies:
+            result = await strategy(query, parameters)
+            if result and result.target_agent:
+                return result
+        return RouteResult(None, None, None, None)
+
+    async def _strategy_explicit_agent(
+        self, query: str, parameters: Optional[Dict[str, Any]]
+    ) -> Optional[RouteResult]:
+        if not isinstance(parameters, dict):
+            return None
+        explicit_agent = str(parameters.get("agent_name", "")).strip()
+        if explicit_agent and explicit_agent.lower() not in _MASTER_AGENT_ALIASES:
+            return RouteResult(target_agent=explicit_agent, source="agent_name", purpose=None, confidence=None)
+        return None
+
+    async def _strategy_explicit_purpose(
+        self, query: str, parameters: Optional[Dict[str, Any]]
+    ) -> Optional[RouteResult]:
+        if not isinstance(parameters, dict):
+            return None
+        purpose = str(parameters.get("purpose", "")).strip().lower()
+        if purpose and purpose in _PURPOSE_AGENT_MAP:
+            return RouteResult(
+                target_agent=_PURPOSE_AGENT_MAP[purpose],
+                source="purpose",
+                purpose=purpose,
+                confidence=None,
+            )
+        return None
+
+    async def _strategy_keyword_infer(
+        self, query: str, parameters: Optional[Dict[str, Any]]
+    ) -> Optional[RouteResult]:
+        inferred = self.infer_purpose_from_query(query)
+        if inferred and inferred in _PURPOSE_AGENT_MAP:
+            return RouteResult(
+                target_agent=_PURPOSE_AGENT_MAP[inferred],
+                source="purpose_inferred",
+                purpose=inferred,
+                confidence=None,
+            )
+        return None
+
+    async def _strategy_llm_infer(
+        self, query: str, parameters: Optional[Dict[str, Any]]
+    ) -> Optional[RouteResult]:
+        inferred = await self.infer_purpose_with_llm(query, parameters)
+        if inferred:
+            return RouteResult(
+                target_agent=_PURPOSE_AGENT_MAP[inferred["purpose"]],
+                source="purpose_inferred_llm",
+                purpose=inferred["purpose"],
+                confidence=inferred["confidence"],
+            )
+        return None
 
     # ------------------------------------------------------------------ #
     # Purpose inference                                                     #

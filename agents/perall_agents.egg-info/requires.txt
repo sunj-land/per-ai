@@ -1,0 +1,12 @@
+fastapi>=0.100.0
+uvicorn>=0.23.0
+pydantic>=2.0.0
+httpx>=0.24.1
+langgraph>=0.2.0
+langgraph-cli>=0.1.60
+pandas>=2.0.0
+litellm>=1.0.0
+python-dotenv>=1.0.0
+loguru<0.8.0,>=0.7.3
+json-repair<0.59.0,>=0.58.6
+oauth-cli-kit<0.2.0,>=0.1.3

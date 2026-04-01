@@ -5,11 +5,29 @@ ReAct 循环模块
 
 import json
 import logging
+from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Dict, List, Optional
 
 from utils.utils import strip_think, extract_think_blocks
 
 logger = logging.getLogger(__name__)
+
+
+class LoopExitReason(str, Enum):
+    DONE           = "done"           # LLM returned no tool calls → clean finish
+    MAX_ITERATIONS = "max_iterations" # hit the iteration cap
+    LLM_ERROR      = "llm_error"      # LLM returned finish_reason == "error"
+
+
+@dataclass
+class LoopResult:
+    content:         str
+    tools_used:      List[str]
+    messages:        List[Dict[str, Any]]
+    reasoning_trace: List[str]
+    exit_reason:     LoopExitReason
+    iterations:      int
 
 
 async def run_agent_loop(
@@ -20,23 +38,17 @@ async def run_agent_loop(
     context: Any,         # core.context.ContextBuilder
     model: str,
     max_iterations: int = 40,
-) -> tuple[Optional[str], List[str], List[Dict[str, Any]], List[str]]:
+) -> LoopResult:
     """
     执行 Agent 的 ReAct（Think-Act-Observe）主循环。
 
-    Args:
-        initial_messages: 初始消息列表（System + History + User）。
-        llm: LLM 服务实例。
-        tools: ToolRegistry 工具注册表。
-        context: ContextBuilder 上下文构建器。
-        model: 使用的模型名称。
-        max_iterations: 最大迭代轮数。
-
     Returns:
-        (final_content, tools_used, full_history, reasoning_trace)
+        LoopResult with exit_reason set to one of:
+          - DONE: LLM returned no tool calls (clean finish)
+          - MAX_ITERATIONS: hit the iteration cap
+          - LLM_ERROR: LLM returned finish_reason == "error"
     """
     messages = initial_messages.copy()
-    final_content: Optional[str] = None
     tools_used: List[str] = []
     reasoning_trace: List[str] = []
 
@@ -52,9 +64,14 @@ async def run_agent_loop(
         )
 
         if response.finish_reason == "error":
-            logger.error("LLM returned error: %s", response.content)
-            final_content = response.content or "Error calling AI model."
-            break
+            return LoopResult(
+                content=response.content or "Error calling AI model.",
+                tools_used=tools_used,
+                messages=messages,
+                reasoning_trace=reasoning_trace,
+                exit_reason=LoopExitReason.LLM_ERROR,
+                iterations=iteration,
+            )
 
         # ---- 2. 提取推理内容 ----
         clean_content = strip_think(response.content)
@@ -101,8 +118,14 @@ async def run_agent_loop(
 
         # ---- 4. 工具调用 or 结束 ----
         if not response.has_tool_calls:
-            final_content = clean_content
-            break
+            return LoopResult(
+                content=clean_content,
+                tools_used=tools_used,
+                messages=messages,
+                reasoning_trace=reasoning_trace,
+                exit_reason=LoopExitReason.DONE,
+                iterations=iteration,
+            )
 
         for tool_call in response.tool_calls:
             if isinstance(tool_call, dict):
@@ -124,7 +147,12 @@ async def run_agent_loop(
             result = await tools.execute(tc_name, args)
             messages = context.add_tool_result(messages, tc_id, tc_name, result)
 
-    if final_content is None:
-        final_content = "Max iterations reached without completion."
-
-    return final_content, tools_used, messages, reasoning_trace
+    # Loop exhausted — MAX_ITERATIONS
+    return LoopResult(
+        content="Max iterations reached without completion.",
+        tools_used=tools_used,
+        messages=messages,
+        reasoning_trace=reasoning_trace,
+        exit_reason=LoopExitReason.MAX_ITERATIONS,
+        iterations=max_iterations,
+    )
