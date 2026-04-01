@@ -1,0 +1,31 @@
+# .gitignore
+
+# 操作系统文件
+.DS_Store
+Thumbs.db
+
+# IDE 和编辑器配置
+.idea/
+.vscode/
+*.swp
+
+# Python
+__pycache__/
+*.pyc
+.env
+venv/
+.venv/
+
+# Node.js
+node_modules/
+dist/
+.pnpm-debug.log
+
+# Cypress
+/cypress/videos/
+/cypress/screenshots/
+
+
+**/logs/**
+backend/data/**
+.gitnexus

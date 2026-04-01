@@ -1,0 +1,23 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "backend",
+      "runtimeExecutable": "uvicorn",
+      "runtimeArgs": ["app.main:app", "--reload", "--port", "8000"],
+      "port": 8000
+    },
+    {
+      "name": "agents",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "agents.main"],
+      "port": 8001
+    },
+    {
+      "name": "frontend",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["dev", "--port", "3000"],
+      "port": 3000
+    }
+  ]
+}

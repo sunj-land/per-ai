@@ -1,0 +1,6 @@
+{
+  "useWorktrees": false,  // 核心开关
+  "worktree": {
+    "autoCreate": false   // 禁止自动创建
+  }
+}
