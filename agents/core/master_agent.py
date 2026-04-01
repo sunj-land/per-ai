@@ -131,7 +131,7 @@ class MasterAgent:
                 if isinstance(request.parameters, dict) else None
             ) or self.model_name
 
-            final_content, tools_used, full_history, reasoning_trace = await run_agent_loop(
+            loop_result = await run_agent_loop(
                 initial_messages,
                 llm=self.llm,
                 tools=self.tools,
@@ -141,7 +141,7 @@ class MasterAgent:
             )
 
             # 7. 持久化新产生的对话轮次
-            for msg in full_history[len(initial_messages):]:
+            for msg in loop_result.messages[len(initial_messages):]:
                 if "timestamp" not in msg:
                     msg["timestamp"] = time.strftime("%Y-%m-%dT%H:%M:%S")
                 session.messages.append(msg)
@@ -149,13 +149,14 @@ class MasterAgent:
             self.session_manager.save(session)
 
             return AgentResponse(
-                answer=final_content or "No response generated.",
+                answer=loop_result.content or "No response generated.",
                 source_agent="master_agent",
                 latency_ms=(time.time() - start_time) * 1000,
                 metadata={
-                    "tools_used": tools_used,
-                    "iteration_count": len(full_history),
-                    "reasoning_trace": reasoning_trace,
+                    "tools_used": loop_result.tools_used,
+                    "iteration_count": loop_result.iterations,
+                    "reasoning_trace": loop_result.reasoning_trace,
+                    "exit_reason": loop_result.exit_reason,
                 },
             )
 
