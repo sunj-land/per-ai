@@ -1,0 +1,17 @@
+Metadata-Version: 2.4
+Name: perall-agents
+Version: 1.1.0
+Summary: LangGraph CLI based intelligent agents service
+Requires-Python: <4.0,>=3.12
+Requires-Dist: fastapi>=0.100.0
+Requires-Dist: uvicorn>=0.23.0
+Requires-Dist: pydantic>=2.0.0
+Requires-Dist: httpx>=0.24.1
+Requires-Dist: langgraph>=0.2.0
+Requires-Dist: langgraph-cli>=0.1.60
+Requires-Dist: pandas>=2.0.0
+Requires-Dist: litellm>=1.0.0
+Requires-Dist: python-dotenv>=1.0.0
+Requires-Dist: loguru<0.8.0,>=0.7.3
+Requires-Dist: json-repair<0.59.0,>=0.58.6
+Requires-Dist: oauth-cli-kit<0.2.0,>=0.1.3

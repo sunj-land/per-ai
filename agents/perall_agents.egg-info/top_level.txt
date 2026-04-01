@@ -1,0 +1,12 @@
+agents
+api
+configs
+core
+docs
+providers
+service_client
+skills
+tests
+tools
+utils
+workspace
