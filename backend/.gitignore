@@ -1,0 +1,45 @@
+# Logs
+logs/
+*.log
+*.log.*
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Environments
+venv/
+.venv/
+env/
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# Coverage
+.coverage
+htmlcov/
+
+# Type hints
+.mypy_cache/
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Workspace
+workspace/
+backups/

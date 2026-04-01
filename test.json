@@ -1,0 +1,56 @@
+{
+  "log": {
+    "loglevel": "warning"
+  },
+  "inbounds": [
+    {
+      "port": 443,
+      "listen": "0.0.0.0",
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          {
+            "id": "0a391e3e-06b0-43ed-b972-342971ff2d57",
+            "flow": ""
+          }
+        ],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {
+          "show": false,
+          "dest": "www.google.com:443",
+          "xver": 0,
+          "serverNames": ["www.google.com"],
+          "privateKey": "2DsZrKta6shfcbyjZTg96mYR_RlUvzfVAr9kWm8pJGA",
+          "maxTimeDiff": 0,
+          "shortIds": ["123456"]
+        }
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "protocol": "freedom"
+    }
+  ]
+}
+
+root@C20260324182055:~# xray x25519
+PrivateKey: 2DsZrKta6shfcbyjZTg96mYR_RlUvzfVAr9kWm8pJGA
+Password: uc8Vgc_wOUiGizS1UAeOHPHftnOJsW6bps2KXa37f2Q
+Hash32: FZ_T0F5f1VkROMSd7RX8_9GgVKSo4Xa9hyibSprAzXg
+
+
+PrivateKey: qKXpKQ91FXL2tu8aEYy0vaiqQjU37fpeqSBlLxxx2Fs
+Password:   r8b51zinNyqTRW5rmjUsHU5xRIwux30RNhXP2xHqER0
+Hash32: RpjXAkDNFn2XR4p8LU_Gn18obQ3l3gQy-Z2LyW9v_DY
+
+
+dexjasper90@gmail.com
+Dex900401@#
+
+
+Az19920408@#

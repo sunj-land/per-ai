@@ -1,0 +1,4 @@
+Starting Benchmark: ArticleSearchTool with Vector Search
+Total time for 100 iterations: 5.1093s
+Average time per execution: 51.09ms
+Benchmark completed.

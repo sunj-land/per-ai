@@ -1,0 +1,15 @@
+system:
+  log_level: "INFO"
+  max_agents: 10
+  timeout: 60
+
+agents:
+  data_analyst:
+    enabled: true
+    skills: ["DataCleaningSkill", "StatisticalAnalysisSkill"]
+  text_processor:
+    enabled: true
+    model: "local-bert"
+  image_recognizer:
+    enabled: true
+    device: "cpu"

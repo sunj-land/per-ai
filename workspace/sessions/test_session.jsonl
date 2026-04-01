@@ -1,0 +1,9 @@
+{"type": "state", "data": {"last_consolidated": 0, "updated_at": "2026-03-26T04:38:50.188162"}}
+{"role": "user", "content": "rss订阅源中分数较高的文章有哪些", "timestamp": "2026-03-26T04:22:54.722411"}
+{"role": "assistant", "content": "{\"status\": \"error\", \"message\": \"Search failed: 404 UPSTREAM_ERROR: Not Found\"}", "timestamp": "2026-03-26T04:22:55.164163"}
+{"role": "user", "content": "rss订阅源中分数较高的文章有哪些", "timestamp": "2026-03-26T04:33:22.186099"}
+{"role": "assistant", "content": "{\"status\": \"error\", \"message\": \"Search failed: 404 UPSTREAM_ERROR: Not Found\"}", "timestamp": "2026-03-26T04:33:22.572805"}
+{"role": "user", "content": "rss订阅源中分数较高的文章有哪些", "timestamp": "2026-03-26T04:36:51.970407"}
+{"role": "assistant", "content": "Found 0 relevant articles.", "timestamp": "2026-03-26T04:36:57.596402"}
+{"role": "user", "content": "rss订阅源中分数较高的文章有哪些", "timestamp": "2026-03-26T04:38:49.790076"}
+{"role": "assistant", "content": "Found 5 relevant articles.", "timestamp": "2026-03-26T04:38:50.188157"}

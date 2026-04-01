@@ -1,0 +1,20 @@
+{
+  "dependencies": [
+    ".",
+    ".."
+  ],
+  "env": ".env",
+  "graphs": {
+    "image_agent": "agents.entries:image_agent_graph",
+    "content_generator_agent": "agents.entries:content_generator_agent_graph",
+    "system_expert_agent": "agents.entries:system_expert_agent_graph",
+    "workflow_agent": "agents.entries:workflow_agent_graph",
+    "comprehensive_demo_agent": "agents.entries:comprehensive_demo_agent_graph",
+    "data_agent": "agents.entries:data_agent_graph",
+    "text_agent": "agents.entries:text_agent_graph",
+    "rss_quality_agent": "agents.entries:rss_quality_agent_graph",
+    "article_agent": "agents.entries:article_agent_graph",
+    "learning_planner_agent": "agents.entries:learning_planner_agent_graph",
+    "shell_risk_agent": "agents.entries:shell_risk_agent_graph"
+  }
+}

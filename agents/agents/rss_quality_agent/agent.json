@@ -1,0 +1,8 @@
+{
+  "id": "rss-quality-agent",
+  "name": "RSSQualityAgent",
+  "description": "面向 RSS 文章质量评分的专用智能体，支持多维度评分、批量处理与规则可视化配置。",
+  "version": "1.0.0",
+  "enabled": true,
+  "type": "workflow"
+}

@@ -1,0 +1,139 @@
+{
+  "master_graph": [
+    {
+      "case": "search_case",
+      "expected": {
+        "answer": "stubbed-answer",
+        "source_agent": "article_agent",
+        "latency_ms": 0.0,
+        "metadata": {
+          "intent": "SEARCH_ARTICLES",
+          "confidence": 0.9,
+          "article_count": 1
+        },
+        "error": null
+      },
+      "actual": {
+        "answer": "stubbed-answer",
+        "source_agent": "article_agent",
+        "latency_ms": 0.0,
+        "metadata": {
+          "intent": "SEARCH_ARTICLES",
+          "confidence": 0.9,
+          "article_count": 1
+        },
+        "error": null
+      },
+      "diff": [],
+      "passed": true
+    },
+    {
+      "case": "chat_case",
+      "expected": {
+        "answer": "stubbed-answer",
+        "source_agent": "article_agent",
+        "latency_ms": 0.0,
+        "metadata": {
+          "intent": "SEARCH_ARTICLES",
+          "confidence": 0.9,
+          "article_count": 1
+        },
+        "error": null
+      },
+      "actual": {
+        "answer": "stubbed-answer",
+        "source_agent": "article_agent",
+        "latency_ms": 0.0,
+        "metadata": {
+          "intent": "SEARCH_ARTICLES",
+          "confidence": 0.9,
+          "article_count": 1
+        },
+        "error": null
+      },
+      "diff": [],
+      "passed": true
+    }
+  ],
+  "collaboration_graph": [
+    {
+      "case": "collaboration_case",
+      "expected": {
+        "task": "summarize text then analyze data",
+        "plan": [
+          "Step 1 for summarize text then analyze data",
+          "Step 2 for summarize text then analyze data"
+        ],
+        "current_step": 2,
+        "results": {
+          "Step 2 for summarize text then analyze data": {
+            "summary": "Step 2 for summarize text then analyze data"
+          }
+        },
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "text_processor: {'summary': 'Step 2 for summarize text then analyze data'}"
+          }
+        ],
+        "final_response": "Task execution completed.\n\nResults:\n- Task: Step 2 for summarize text then analyze data\n  Result: {'summary': 'Step 2 for summarize text then analyze data'}\n"
+      },
+      "actual": {
+        "task": "summarize text then analyze data",
+        "plan": [
+          "Step 1 for summarize text then analyze data",
+          "Step 2 for summarize text then analyze data"
+        ],
+        "current_step": 2,
+        "results": {
+          "Step 1 for summarize text then analyze data": {
+            "summary": "Step 1 for summarize text then analyze data"
+          },
+          "Step 2 for summarize text then analyze data": {
+            "summary": "Step 2 for summarize text then analyze data"
+          }
+        },
+        "final_response": "Task execution completed.\n\nResults:\n- Task: Step 1 for summarize text then analyze data\n  Result: {'summary': 'Step 1 for summarize text then analyze data'}\n- Task: Step 2 for summarize text then analyze data\n  Result: {'summary': 'Step 2 for summarize text then analyze data'}\n",
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "text_processor: {'summary': 'Step 1 for summarize text then analyze data'}"
+          },
+          {
+            "role": "assistant",
+            "content": "text_processor: {'summary': 'Step 2 for summarize text then analyze data'}"
+          }
+        ]
+      },
+      "diff": [
+        "--- legacy",
+        "+++ langgraph",
+        "@@ -1,7 +1,11 @@",
+        " {",
+        "   \"current_step\": 2,",
+        "-  \"final_response\": \"Task execution completed.\\n\\nResults:\\n- Task: Step 2 for summarize text then analyze data\\n  Result: {'summary': 'Step 2 for summarize text then analyze data'}\\n\",",
+        "+  \"final_response\": \"Task execution completed.\\n\\nResults:\\n- Task: Step 1 for summarize text then analyze data\\n  Result: {'summary': 'Step 1 for summarize text then analyze data'}\\n- Task: Step 2 for summarize text then analyze data\\n  Result: {'summary': 'Step 2 for summarize text then analyze data'}\\n\",",
+        "   \"messages\": [",
+        "+    {",
+        "+      \"content\": \"text_processor: {'summary': 'Step 1 for summarize text then analyze data'}\",",
+        "+      \"role\": \"assistant\"",
+        "+    },",
+        "     {",
+        "       \"content\": \"text_processor: {'summary': 'Step 2 for summarize text then analyze data'}\",",
+        "       \"role\": \"assistant\"",
+        "@@ -12,6 +16,9 @@",
+        "     \"Step 2 for summarize text then analyze data\"",
+        "   ],",
+        "   \"results\": {",
+        "+    \"Step 1 for summarize text then analyze data\": {",
+        "+      \"summary\": \"Step 1 for summarize text then analyze data\"",
+        "+    },",
+        "     \"Step 2 for summarize text then analyze data\": {",
+        "       \"summary\": \"Step 2 for summarize text then analyze data\"",
+        "     }"
+      ],
+      "passed": false
+    }
+  ],
+  "zero_diff": false
+}
