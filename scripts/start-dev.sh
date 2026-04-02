@@ -4,7 +4,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 LOG_DIR="${PROJECT_ROOT}/logs"
-PID_DIR="${PROJECT_ROOT}/pids"
 SKIP_PORTS=0
 
 print_help() {
@@ -47,7 +46,7 @@ for arg in "$@"; do
 	esac
 done
 
-mkdir -p "${LOG_DIR}" "${PID_DIR}"
+mkdir -p "${LOG_DIR}"
 
 if [[ "${DEBUG_CLI:-0}" -eq 1 ]]; then
     if ! check_langgraph_config; then
@@ -151,14 +150,11 @@ start_service() {
 	local cmd="$2"
 	local cwd="$3"
 	local logfile="$4"
-	local pidfile="${PID_DIR}/${name}.pid"
 	: >"${logfile}"
 	(
 		cd "${cwd}"
 		exec bash -lc "${cmd}" >>"${logfile}" 2>&1
 	) &
-	local pid="$!"
-	echo "${pid}" >"${pidfile}"
 }
 
 tail_service_log() {
@@ -166,7 +162,6 @@ tail_service_log() {
 	local logfile="$2"
 	local color="$3"
 	(tail -n 0 -F "${logfile}" 2>/dev/null | awk -v prefix="[${name}] " -v c="${color}" '{print c prefix $0 "\033[0m"; fflush();}') &
-	echo "$!" >"${PID_DIR}/${name}.tail.pid"
 }
 
 cleanup_started() {
