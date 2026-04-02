@@ -19,9 +19,12 @@ class AgentsServiceAsyncClient:
     """
     _instance = None
 
+    """
+    Singleton pattern to ensure only one instance exists.
+    """
     def __new__(cls):
         if cls._instance is None:
-            cls._instance = super(AgentsServiceAsyncClient, cls).__new__(cls)
+            cls._instance = super().__new__(cls)
             cls._instance._initialize()
         return cls._instance
 

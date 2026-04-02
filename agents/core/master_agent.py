@@ -204,6 +204,26 @@ class MasterAgent:
                 request.parameters.get("purpose")
                 if isinstance(request.parameters, dict) else None
             )
+
+            # Build reasoning trace from routing decision + any reasoning in the sub-agent result
+            reasoning_trace: List[str] = []
+            routing_step = f"路由至「{route.target_agent}」（策略：{route.source}"
+            if route.confidence is not None:
+                routing_step += f"，置信度：{round(route.confidence * 100)}%"
+            if purpose:
+                routing_step += f"，用途：{purpose}"
+            routing_step += "）"
+            reasoning_trace.append(routing_step)
+
+            if isinstance(result, dict):
+                sub_reasoning = result.get("reasoning") or result.get("reasoning_trace")
+                if isinstance(sub_reasoning, list):
+                    reasoning_trace.extend(
+                        str(item).strip() for item in sub_reasoning if item and str(item).strip()
+                    )
+                elif isinstance(sub_reasoning, str) and sub_reasoning.strip():
+                    reasoning_trace.append(sub_reasoning.strip())
+
             return AgentResponse(
                 answer=answer,
                 source_agent=route.target_agent,
@@ -218,6 +238,7 @@ class MasterAgent:
                     },
                     "delegated_task": task,
                     "delegated_result": result,
+                    "reasoning_trace": reasoning_trace,
                 },
             )
         except Exception as exc:

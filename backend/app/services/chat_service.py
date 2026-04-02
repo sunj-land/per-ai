@@ -171,12 +171,173 @@ class ChatService:
             return f"ollama/{normalized}"
         return normalized
 
+    # ------------------------------------------------------------------
+    # Debug breakpoint helper
+    # ------------------------------------------------------------------
+    def _dbp(self, tag: str, **fields) -> None:
+        """Emit a structured DEBUG log line for a named breakpoint.
+
+        Enable with LOG_LEVEL=DEBUG (or logger.setLevel(logging.DEBUG)).
+        Each call produces one log line so grep/jq can filter per tag.
+
+        Usage::
+            self._dbp("BP-2", images_count=3, context_bytes=512)
+        """
+        if not logger.isEnabledFor(logging.DEBUG):
+            return
+        parts = " ".join(f"{k}={v!r}" for k, v in fields.items())
+        logger.debug("[send_message:%s] %s", tag, parts)
+
     def _iter_text_chunks(self, text: str, chunk_size: int = 120) -> Generator[str, None, None]:
         normalized_text = str(text or "")
         if not normalized_text:
             return
         for index in range(0, len(normalized_text), chunk_size):
             yield normalized_text[index:index + chunk_size]
+
+    async def _process_attachments(
+        self,
+        session: Session,
+        images: Optional[List[str]],
+        attachments: Optional[List[str]],
+    ) -> tuple[list, str]:
+        """
+        Process raw images and attachment UUIDs into a usable form.
+
+        Returns:
+            processed_images: list of data-URL strings (original images + image attachments).
+            attachment_context: concatenated file-content block for document attachments.
+        """
+        processed_images: list = list(images) if images else []
+        attachment_context = ""
+
+        if not attachments:
+            return processed_images, attachment_context
+
+        for attach_id in attachments:
+            try:
+                attachment = session.get(Attachment, attach_id)
+                if not attachment:
+                    continue
+
+                file_path = storage_service.get_absolute_path(attachment.local_path)
+                if not os.path.exists(file_path):
+                    continue
+
+                if attachment.mime_type.startswith("image/"):
+                    with open(file_path, "rb") as image_file:
+                        encoded_string = base64.b64encode(image_file.read()).decode("utf-8")
+                        data_url = f"data:{attachment.mime_type};base64,{encoded_string}"
+                        processed_images.append(data_url)
+                else:
+                    extracted_text = await asyncio.to_thread(
+                        self._extract_text_from_file, file_path, attachment.mime_type
+                    )
+                    if len(extracted_text) > 20000:
+                        extracted_text = extracted_text[:20000] + "\n...(truncated)..."
+                    attachment_context += (
+                        f"\n\n[File Content: {attachment.original_name}]\n```\n{extracted_text}\n```\n"
+                    )
+            except Exception as e:
+                logger.error(f"Error processing attachment {attach_id}: {e}")
+
+        return processed_images, attachment_context
+
+    def _build_message_context(
+        self,
+        session: Session,
+        session_id: uuid.UUID,
+        extra: Optional[dict],
+        user_msg_id: Any,
+        full_user_content: str,
+    ) -> list:
+        """
+        Build the ordered messages list that will be sent to the AI provider.
+
+        Injects an optional user-profile system message, then appends the
+        conversation history (substituting the full content for the current
+        user message).
+
+        Returns:
+            List of message dicts with keys: role, content, images.
+        """
+        history = self.get_messages(session, session_id)
+        if extra and extra.get("ignore_history"):
+            history = history[-1:] if history else []
+
+        messages: list = []
+
+        try:
+            user_profile = user_profile_service.get_profile(session)
+            if user_profile.identity or user_profile.rules:
+                profile_prompt = "User Profile Context:\n"
+                if user_profile.identity:
+                    profile_prompt += f"Soul Identity: {user_profile.identity}\n"
+                if user_profile.rules:
+                    profile_prompt += f"Personal Rules: {user_profile.rules}\n"
+                profile_prompt += "Please tailor your response based on this context."
+                messages.append({"role": "system", "content": profile_prompt})
+        except Exception as e:
+            logger.error(f"Failed to inject user profile: {e}")
+
+        for msg in history:
+            msg_content = msg.get("content", "")
+            if str(msg.get("id")) == str(user_msg_id):
+                msg_content = full_user_content
+            messages.append({
+                "role": msg.get("role", "user"),
+                "content": msg_content,
+                "images": msg.get("images", []),
+            })
+
+        return messages
+
+    def _extract_send_options(self, extra: Optional[dict]) -> tuple[str, str, bool]:
+        """
+        Extract agent routing options from the ``extra`` request dict.
+
+        Returns:
+            agent_id: the agent to invoke (defaults to "MasterAgent").
+            purpose: optional purpose string for routing hints.
+            stage_progress_enabled: whether to stream reasoning-stage progress events.
+        """
+        agent_id = "MasterAgent"
+        purpose = ""
+        stage_progress_enabled = True
+
+        if not isinstance(extra, dict):
+            return agent_id, purpose, stage_progress_enabled
+
+        agent_id = extra.get("agent_id") or "MasterAgent"
+        purpose = str(extra.get("purpose", "")).strip().lower()
+
+        stream_options = extra.get("stream_options")
+        if isinstance(stream_options, dict):
+            stage_progress_enabled = bool(stream_options.get("stage_progress_enabled", True))
+
+        return agent_id, purpose, stage_progress_enabled
+
+    def _build_agent_history_messages(self, messages: list) -> list:
+        """
+        Convert the message context list (excluding the last user message) into
+        the ``AgentMessageContract`` format required by the agents service.
+
+        Returns:
+            List[AgentMessageContract]
+        """
+        history_messages = []
+        for msg in messages[:-1]:
+            role = msg.get("role", "user")
+            if role not in {"system", "user", "assistant"}:
+                continue
+            history_messages.append(
+                AgentMessageContract(
+                    role=role,
+                    content=msg.get("content", ""),
+                    metadata={},
+                )
+            )
+        return history_messages
 
 
 
@@ -436,71 +597,29 @@ class ChatService:
             except ValueError:
                 pass
 
-        # 1. Retrieve session (获取会话)
+        # ── BP-1: session lookup ───────────────────────────────────
         chat_session = session.get(ChatSession, session_id)
         if not chat_session:
             raise ValueError("Session not found")
 
-        # Process attachments (处理附件)
-        processed_images = []
-        if images:
-            processed_images.extend(images)
-
-        attachment_context = ""
-
-        if attachments:
-            for attach_id in attachments:
-                try:
-                    attachment = session.get(Attachment, attach_id)
-                    if not attachment:
-                        continue
-
-                    file_path = storage_service.get_absolute_path(attachment.local_path)
-                    if not os.path.exists(file_path):
-                        continue
-
-                    # Handle Image (处理图片)
-                    if attachment.mime_type.startswith("image/"):
-                        # Read image and convert to base64
-                        with open(file_path, "rb") as image_file:
-                            encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
-                            # Determine format
-                            img_format = attachment.mime_type.split('/')[-1]
-                            if img_format == "svg+xml": img_format = "svg"
-                            data_url = f"data:{attachment.mime_type};base64,{encoded_string}"
-                            processed_images.append(data_url)
-
-                    # Handle Documents & Text (处理文档和文本)
-                    else:
-                        extracted_text = await asyncio.to_thread(self._extract_text_from_file, file_path, attachment.mime_type)
-
-                        # Limit context size (e.g., 20KB)
-                        if len(extracted_text) > 20000:
-                            extracted_text = extracted_text[:20000] + "\n...(truncated)..."
-
-                        attachment_context += f"\n\n[File Content: {attachment.original_name}]\n```\n{extracted_text}\n```\n"
-
-                except Exception as e:
-                    logger.error(f"Error processing attachment {attach_id}: {e}")
-
-        # Append attachment context to user content
+        # ── BP-2: attachment processing ────────────────────────────
+        processed_images, attachment_context = await self._process_attachments(session, images, attachments)
         full_user_content = content + attachment_context
 
-        # 2. Save user message (保存用户消息)
+        # ── BP-3: save user message ────────────────────────────────
         try:
             user_msg = ChatMessage(
                 session_id=session_id,
                 role="user",
-                content=content, # Store original content
+                content=content,
                 images=processed_images,
-                attachments=attachments, # Store attachment UUIDs
+                attachments=attachments,
                 extra=extra
             )
             session.add(user_msg)
             session.commit()
             session.refresh(user_msg)
 
-            # Broadcast user message (广播用户消息事件)
             msg_dict = {
                 "id": str(user_msg.id),
                 "role": user_msg.role,
@@ -525,61 +644,37 @@ class ChatService:
         # connection is not held open across the streaming phase.
         session.expunge_all()
 
-        # 3. Request Agents Service directly
         client = AgentsServiceAsyncClient()
 
         try:
-            # Re-fetch history (重新获取历史消息)
-            history = self.get_messages(session, session_id)
-
-            # If ignore_history is set, only keep the last message (current user message)
-            if extra and extra.get("ignore_history"):
-                history = history[-1:] if history else []
-
-            messages = []
-
-            # Inject User Profile (注入用户资料上下文)
-            try:
-                user_profile = user_profile_service.get_profile(session)
-                if user_profile.identity or user_profile.rules:
-                    profile_prompt = "User Profile Context:\n"
-                    if user_profile.identity:
-                        profile_prompt += f"Soul Identity: {user_profile.identity}\n"
-                    if user_profile.rules:
-                        profile_prompt += f"Personal Rules: {user_profile.rules}\n"
-                    profile_prompt += "Please tailor your response based on this context."
-                    messages.append({"role": "system", "content": profile_prompt})
-            except Exception as e:
-                logger.error(f"Failed to inject user profile: {e}")
-
-            # Convert history to format expected by AIProvider
-            for msg in history:
-                msg_content = msg.get("content", "")
-                if str(msg.get("id")) == str(user_msg.id):
-                    msg_content = full_user_content
-
-                messages.append({
-                    "role": msg.get("role", "user"),
-                    "content": msg_content,
-                    "images": msg.get("images", [])
-                })
+            # ── BP-5: message context built ────────────────────────
+            messages = self._build_message_context(
+                session, session_id, extra, user_msg.id, full_user_content
+            )
+            has_profile_msg = bool(messages and messages[0].get("role") == "system")
+            self._dbp(
+                "BP-5:message_context",
+                total_messages=len(messages),
+                has_profile_system_msg=has_profile_msg,
+                ignore_history=bool(extra and extra.get("ignore_history")),
+            )
 
             normalized_model_id = self._normalize_model_id(model_id)
             full_content = ""
             full_reasoning = ""
             assistant_extra = None
-            selected_agent_id = extra.get("agent_id") if isinstance(extra, dict) else None
-            if not selected_agent_id:
-                selected_agent_id = "MasterAgent"
-            
-            selected_purpose = ""
-            stage_progress_enabled = True
-            if isinstance(extra, dict):
-                selected_purpose = str(extra.get("purpose", "")).strip().lower()
-                stream_options = extra.get("stream_options")
-                if isinstance(stream_options, dict):
-                    stage_progress_enabled = bool(stream_options.get("stage_progress_enabled", True))
 
+            # ── BP-6: routing options ──────────────────────────────
+            selected_agent_id, selected_purpose, stage_progress_enabled = self._extract_send_options(extra)
+            self._dbp(
+                "BP-6:send_options",
+                agent_id=selected_agent_id,
+                purpose=selected_purpose,
+                stage_progress_enabled=stage_progress_enabled,
+                route="agent" if (selected_agent_id or selected_purpose) else "direct",
+            )
+
+            # selected_agent_id默认值会一直是MasterAgent
             if selected_agent_id or selected_purpose:
                 yield json.dumps(
                     {
@@ -588,18 +683,10 @@ class ChatService:
                     },
                     ensure_ascii=False,
                 ) + "\n"
-                history_messages = []
-                for msg in messages[:-1]:
-                    role = msg.get("role", "user")
-                    if role not in {"system", "user", "assistant"}:
-                        continue
-                    history_messages.append(
-                        AgentMessageContract(
-                            role=role,
-                            content=msg.get("content", ""),
-                            metadata={},
-                        )
-                    )
+
+                # ── BP-7: agent request built ──────────────────────
+                history_messages = self._build_agent_history_messages(messages)
+                self._dbp("BP-7:agent_history", history_count=len(history_messages))
 
                 query_request = AgentQueryRequestContract(
                     query=full_user_content,
@@ -617,22 +704,29 @@ class ChatService:
                     while not query_task.done():
                         await asyncio.sleep(0.35)
                         wait_seconds += 0.35
-                        if stage_progress_enabled:
-                            yield json.dumps(
-                                {
-                                    "reasoning": f"阶段流：Agent 正在思考中（{int(wait_seconds)}s）...",
-                                    "metadata": {"stream_stage": "reasoning"},
-                                },
-                                ensure_ascii=False,
-                            ) + "\n"
                     query_response = await query_task
                 except asyncio.CancelledError:
                     if not query_task.done():
                         query_task.cancel()
                     raise
+
+                # ── BP-9: agent response received ──────────────────
+                # Update selected_agent_id to reflect the agent that actually processed the request
+                selected_agent_id = query_response.source_agent or selected_agent_id
+                self._dbp(
+                    "BP-9:agent_response",
+                    wait_seconds=round(wait_seconds, 2),
+                    has_error=bool(query_response.error),
+                    answer_len=len(query_response.answer or ""),
+                    source_agent=query_response.source_agent,
+                    actual_agent_id=selected_agent_id,
+                    latency_ms=query_response.latency_ms,
+                    metadata_keys=list(query_response.metadata.keys()) if isinstance(query_response.metadata, dict) else None,
+                )
                 if query_response.error:
                     yield json.dumps({"error": query_response.error}) + "\n"
                     return
+
                 full_content = query_response.answer or ""
                 reasoning_trace = []
                 routing_meta = {}
@@ -648,14 +742,28 @@ class ChatService:
                             if isinstance(item, str) and str(item).strip()
                         ]
                 assistant_extra = {
-                    "source_agent": query_response.source_agent,
+                    "source_agent": selected_agent_id,
                     "latency_ms": query_response.latency_ms,
                     "routing": routing_meta,
                 }
+
+                # Yield an agent-selected event so the frontend knows the actual agent
+                yield json.dumps(
+                    {
+                        "reasoning": f"已选择 Agent：{selected_agent_id}",
+                        "metadata": {
+                            **assistant_extra,
+                            "stream_stage": "agent_selected",
+                        },
+                    },
+                    ensure_ascii=False,
+                ) + "\n"
+
                 if reasoning_trace:
                     reasoning_text = "\n\n".join(reasoning_trace)
                     full_reasoning = reasoning_text
-                    for reasoning_chunk in self._iter_text_chunks(reasoning_text, chunk_size=120):
+                    reasoning_chunks = list(self._iter_text_chunks(reasoning_text, chunk_size=120))
+                    for reasoning_chunk in reasoning_chunks:
                         yield json.dumps(
                             {
                                 "reasoning": reasoning_chunk,
@@ -666,7 +774,9 @@ class ChatService:
                             },
                             ensure_ascii=False,
                         ) + "\n"
-                for content_chunk in self._iter_text_chunks(full_content, chunk_size=120):
+
+                content_chunks = list(self._iter_text_chunks(full_content, chunk_size=120))
+                for content_chunk in content_chunks:
                     yield json.dumps(
                         {
                             "content": content_chunk,
@@ -679,6 +789,10 @@ class ChatService:
                         ensure_ascii=False,
                     ) + "\n"
             else:
+                # ── BP-7D: direct completion path ──────────────────
+                # NOTE: structurally unreachable — _extract_send_options always
+                # returns "MasterAgent" as default agent_id.
+                self._dbp("BP-7D:direct_path", model=normalized_model_id)
                 request_contract = ChatCompletionRequestContract(
                     messages=messages,
                     model=normalized_model_id,
@@ -689,50 +803,48 @@ class ChatService:
                 )
 
                 stream = client.chat_completion_stream(request_contract)
-
+                direct_chunk_count = 0
                 async for chunk_str in stream:
                     try:
                         data = json.loads(chunk_str)
-                        content = data.get("content", "")
+                        chunk_content = data.get("content", "")
                         reasoning = data.get("reasoning", "")
 
-                        if content:
-                            full_content += content
+                        if chunk_content:
+                            full_content += chunk_content
                             data["metadata"] = {
                                 **(data.get("metadata") if isinstance(data.get("metadata"), dict) else {}),
                                 "stream_stage": "final_answer",
                             }
                         if reasoning:
                             full_reasoning += reasoning
-                            if not content:
+                            if not chunk_content:
                                 data["metadata"] = {
                                     **(data.get("metadata") if isinstance(data.get("metadata"), dict) else {}),
                                     "stream_stage": "reasoning",
                                 }
+                        direct_chunk_count += 1
 
                         yield json.dumps(data, ensure_ascii=False) + "\n"
                     except json.JSONDecodeError:
+                        direct_chunk_count += 1
                         if chunk_str.startswith("Error:"):
                             yield json.dumps({"error": chunk_str}) + "\n"
                         else:
                             full_content += chunk_str
                             yield json.dumps({"content": chunk_str}) + "\n"
 
-            # 4. Save assistant response (保存助手回复)
-            # Phase 3: open a fresh short-lived session so the injected session
-            # (held by FastAPI's Depends scope) is not kept alive across the
-            # entire streaming duration.
-            # 如果有推理内容，将其用 <think> 标签包裹
+            # ── BP-11: assemble final content ──────────────────────
             final_content = full_content
             if full_reasoning:
                 final_content = f"<think>\n{full_reasoning}\n</think>\n\n{full_content}"
 
+            # ── BP-12: save assistant message (new session) ────────
             from app.core.database import engine as _engine
             with Session(_engine) as post_session:
                 assistant_msg = ChatMessage(session_id=session_id, role="assistant", content=final_content, extra=assistant_extra)
                 post_session.add(assistant_msg)
 
-                # Re-fetch session to update timestamp (injected session may be closed)
                 chat_session_post = post_session.get(ChatSession, session_id)
                 if chat_session_post:
                     chat_session_post.updated_at = assistant_msg.created_at
