@@ -32,3 +32,6 @@ backend/data/**
 
 # Git worktrees
 .worktrees/
+
+**/workspace/**
+**/pids/**

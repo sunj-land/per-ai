@@ -162,7 +162,7 @@
              </div>
           </div>
         </div>
-        <div v-if="isSending" class="message-wrapper assistant">
+        <div v-if="isSending && !messages.some(m => m.role === 'assistant' && m.isNew)" class="message-wrapper assistant">
            <a-avatar :size="32" style="background-color: rgb(var(--primary-6))">AI</a-avatar>
            <div class="message-content">
               <div class="bubble">

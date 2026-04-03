@@ -136,9 +136,9 @@ async def list_models(token: str = Depends(verify_api_key)):
     """
     # Provide a static list or fetch from config
     return [
+        {"id": "deepseek/deepseek-chat", "name": "DeepSeek Chat", "enabled": True},
         {"id": "ollama/qwen3-vl:8b", "name": "Qwen3 VL (8B)", "enabled": True},
         {"id": "ollama/llama3", "name": "Llama 3", "enabled": True},
-        {"id": "deepseek/deepseek-chat", "name": "DeepSeek Chat", "enabled": True},
         {"id": "gpt-4o", "name": "GPT-4o", "enabled": True},
     ]
 

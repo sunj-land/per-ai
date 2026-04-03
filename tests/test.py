@@ -1,9 +1,12 @@
-_PURPOSE_CLASSIFICATION_PROMPT = (
-  "你是用途分类器。"
-  "请将用户请求分类到以下purpose之一："
-  "article_search,text_summarize,data_analysis,workflow_planning,general。"
-  "必须仅返回JSON对象，格式为："
-  '{"purpose":"general","confidence":0.0}。'
-  "confidence取值范围[0,1]。"
-)
-print(_PURPOSE_CLASSIFICATION_PROMPT)
+# 普通函数：一次性返回整个列表
+def get_numbers():
+    return [1, 2, 3, 4, 5]
+
+# 生成器函数：按需产生值（惰性计算）
+def counter():
+    for i in range(5):
+        yield i  # 每次只产生一个值
+
+# 使用
+for num in counter():
+    print(num)

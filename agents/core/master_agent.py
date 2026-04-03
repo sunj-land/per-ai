@@ -7,7 +7,7 @@ import logging
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
 
 from core.monitor import AgentMonitor
 from core.protocol import AgentRequest, AgentResponse
@@ -17,7 +17,7 @@ from core.context import ContextBuilder
 from core.memory import MemoryConsolidator
 from core.registry import ToolRegistry
 from core.router import AgentRouter, RouteResult
-from core.react_loop import run_agent_loop, LoopResult, LoopExitReason
+from core.react_loop import run_agent_loop, run_agent_loop_stream, LoopResult, LoopExitReason
 from tools.filesystem import ReadFileTool, WriteFileTool, EditFileTool, ListDirTool
 from utils.utils import ensure_dir
 
@@ -107,6 +107,137 @@ class MasterAgent:
                 latency_ms=(time.time() - start_time) * 1000,
                 error=str(e),
             )
+
+    async def process_request_stream(
+        self, request: AgentRequest
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        Streaming variant of process_request.
+        Yields NDJSON-serialisable dicts as events happen so the caller can
+        forward reasoning steps and tool calls to the client in real time.
+
+        Event shapes:
+          {"event": "routing",   "data": {"target_agent": str, "source": str, ...}}
+          {"event": "reasoning", "data": {"step": int, "content": str}}
+          {"event": "tool_call", "data": {"name": str, "iteration": int}}
+          {"event": "done",      "data": {"answer": str, "source_agent": str, "latency_ms": float, "metadata": dict}}
+          {"event": "error",     "data": {"message": str}}
+        """
+        start_time = time.time()
+        try:
+            # ── 1. 会话建立 ──────────────────────────────────────────
+            yield {
+                "event": "status",
+                "data": {"stage": "session_setup", "message": "正在建立会话上下文…"},
+            }
+            session, messages = self._setup_session(request)
+
+            # ── 2. 路由解析 ──────────────────────────────────────────
+            yield {
+                "event": "status",
+                "data": {"stage": "routing", "message": "正在分析请求，选择目标 Agent…"},
+            }
+            route = await self._route_request(request)
+
+            if route.target_agent:
+                yield {
+                    "event": "routing",
+                    "data": {
+                        "target_agent": route.target_agent,
+                        "source": route.source,
+                        "purpose": route.purpose,
+                        "confidence": route.confidence,
+                    },
+                }
+                yield {
+                    "event": "status",
+                    "data": {
+                        "stage": "delegating",
+                        "message": f"委托至 Agent：{route.target_agent}，等待响应…",
+                    },
+                }
+                response = await self._delegate_to_agent(request, session, route, start_time)
+                if response is not None:
+                    for step in (response.metadata.get("reasoning_trace") or []):
+                        yield {"event": "reasoning", "data": {"content": step}}
+                    yield {
+                        "event": "done",
+                        "data": {
+                            "answer": response.answer,
+                            "source_agent": response.source_agent,
+                            "latency_ms": response.latency_ms,
+                            "metadata": response.metadata,
+                        },
+                    }
+                    return
+
+            # ── 3. 回退至 MasterAgent 自身的 ReAct 循环 ─────────────
+            yield {
+                "event": "routing",
+                "data": {"target_agent": "master_agent", "source": "fallback", "purpose": None, "confidence": None},
+            }
+            yield {
+                "event": "status",
+                "data": {
+                    "stage": "react_start",
+                    "message": "启动 ReAct 推理循环（最多 {} 步）…".format(self.max_iterations),
+                    "max_iterations": self.max_iterations,
+                },
+            }
+
+            effective_model = (
+                request.parameters.get("model_version")
+                if isinstance(request.parameters, dict) else None
+            ) or self.model_name
+
+            done_data: Optional[Dict[str, Any]] = None
+            async for loop_event in run_agent_loop_stream(
+                messages,
+                llm=self.llm,
+                tools=self.tools,
+                context=self.context,
+                model=effective_model,
+                max_iterations=self.max_iterations,
+            ):
+                if loop_event.event == "done":
+                    done_data = loop_event.data
+                else:
+                    # Forward all events (status, reasoning, tool_call, tool_result, error) in real time
+                    yield {"event": loop_event.event, "data": loop_event.data}
+
+            # ── 4. 持久化并发出最终 done 事件 ────────────────────────
+            if done_data:
+                yield {
+                    "event": "status",
+                    "data": {"stage": "persisting", "message": "正在保存会话…"},
+                }
+                for msg in done_data.get("messages", []):
+                    if "timestamp" not in msg:
+                        msg["timestamp"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+                    session.messages.append(msg)
+                session.updated_at = datetime.now()
+                self.session_manager.save(session)
+
+                total_ms = (time.time() - start_time) * 1000
+                yield {
+                    "event": "done",
+                    "data": {
+                        "answer": done_data.get("content", ""),
+                        "source_agent": "master_agent",
+                        "latency_ms": total_ms,
+                        "metadata": {
+                            "tools_used": done_data.get("tools_used", []),
+                            "iteration_count": done_data.get("iterations", 0),
+                            "exit_reason": done_data.get("exit_reason", ""),
+                            "reasoning_trace": done_data.get("reasoning_trace", []),
+                            "total_elapsed_ms": int(total_ms),
+                        },
+                    },
+                }
+
+        except Exception as e:
+            logger.error("MasterAgent stream failed: %s", e, exc_info=True)
+            yield {"event": "error", "data": {"message": str(e)}}
 
     # ------------------------------------------------------------------ #
     # Private helpers                                                        #

@@ -54,6 +54,16 @@ export default defineConfig({
 				changeOrigin: true,
 				timeout: 300000,
 				proxyTimeout: 300000,
+				configure: (proxy) => {
+					proxy.on("proxyRes", (proxyRes) => {
+						// Disable response buffering for NDJSON streaming endpoints
+						const ct = proxyRes.headers["content-type"] || "";
+						if (ct.includes("ndjson") || ct.includes("event-stream")) {
+							proxyRes.headers["x-accel-buffering"] = "no";
+							proxyRes.headers["cache-control"] = "no-cache";
+						}
+					});
+				},
 			},
 		},
 	},

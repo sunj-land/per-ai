@@ -134,7 +134,12 @@ async def send_message(
 
     return StreamingResponse(
         stream,
-        media_type="application/x-ndjson"
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache, no-store",
+            "X-Accel-Buffering": "no",
+            "Transfer-Encoding": "chunked",
+        },
     )
 
 @router.get("/sessions/{session_id}/events", summary="SSE endpoint for session events")

@@ -25,6 +25,57 @@ class LLMResponse:
         """检查响应是否包含工具调用。"""
         return bool(self.tool_calls)
 
+def _prepare_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    在发送给 LLM 之前清理消息列表：
+    1. 删除无用消息（无内容、无工具调用且非工具结果）。
+    2. 从 assistant 消息中剥离 reasoning_content / thinking_blocks，
+       这些字段仅用于当前轮次的响应，发回历史时可能导致部分提供商
+       （尤其是 DeepSeek）在消息结构变换中丢失 tool_calls，
+       进而触发 "tool must follow tool_calls" 错误。
+    3. 校验工具消息顺序，丢弃孤立的 tool 消息（无对应 tool_calls 前驱），
+       防止因边缘情况产生非法请求。
+    """
+    # Step 1: 过滤空消息
+    filtered = [
+        msg for msg in messages
+        if msg.get("content") or msg.get("tool_calls") or msg.get("role") == "tool"
+    ]
+
+    # Step 2: 剥离 assistant 消息中的推理字段
+    cleaned: List[Dict[str, Any]] = []
+    for msg in filtered:
+        if msg.get("role") == "assistant" and (
+            "reasoning_content" in msg or "thinking_blocks" in msg
+        ):
+            msg = {k: v for k, v in msg.items() if k not in ("reasoning_content", "thinking_blocks")}
+        cleaned.append(msg)
+
+    # Step 3: 丢弃孤立的 tool 消息
+    validated: List[Dict[str, Any]] = []
+    for msg in cleaned:
+        if msg.get("role") == "tool":
+            # 检查 validated 中最后一条 assistant 消息是否带有 tool_calls
+            has_tool_calls = False
+            for prev in reversed(validated):
+                if prev.get("role") == "assistant":
+                    has_tool_calls = bool(prev.get("tool_calls"))
+                    break
+                elif prev.get("role") == "tool":
+                    continue  # 连续的 tool 结果，继续向前找
+                else:
+                    break
+            if not has_tool_calls:
+                logger.warning(
+                    "Dropping orphaned tool message (tool_call_id=%s) — no preceding assistant tool_calls found",
+                    msg.get("tool_call_id"),
+                )
+                continue
+        validated.append(msg)
+
+    return validated
+
+
 class LLMService:
     """
     统一 LLM 服务类，使用 litellm 库。
@@ -68,7 +119,7 @@ class LLMService:
         if 'timeout' not in kwargs:
             kwargs['timeout'] = 300.0
 
-        messages = [msg for msg in messages if msg.get("content")]
+        messages = _prepare_messages(messages)
         model = model or self.default_model
         params = {
             "model": model,
@@ -114,6 +165,136 @@ class LLMService:
                     content=f"Error calling LLM: {str(e)}",
                     finish_reason="error"
                 )
+
+    async def chat_with_retry_stream(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+        model: Optional[str] = None,
+        tool_choice: Optional[Any] = None,
+        max_retries: int = 3,
+        **kwargs,
+    ) -> AsyncGenerator[tuple, None]:
+        """
+        Streaming variant of chat_with_retry.
+
+        Yields:
+          ("reasoning", str)       — reasoning/thinking chunk as it arrives
+          ("done", LLMResponse)    — final assembled response (always last)
+        """
+        if "timeout" not in kwargs:
+            kwargs["timeout"] = 300.0
+
+        messages = _prepare_messages(messages)
+        model = model or self.default_model
+        params = {
+            "model": model,
+            "messages": messages,
+            "tools": tools,
+            "tool_choice": tool_choice,
+            "stream": True,
+            **kwargs,
+        }
+        if "api_key" not in params and self.default_api_key:
+            params["api_key"] = self.default_api_key
+        if "base_url" not in params and self.default_base_url:
+            params["base_url"] = self.default_base_url
+        params = {k: v for k, v in params.items() if v is not None}
+
+        for attempt in range(max_retries + 1):
+            try:
+                response = await acompletion(**params)
+                full_content = ""
+                full_reasoning = ""
+                tool_calls_acc: Dict[int, Dict[str, Any]] = {}
+                finish_reason: Optional[str] = None
+
+                async for chunk in response:
+                    choices = getattr(chunk, "choices", None) or []
+                    if not choices:
+                        continue
+                    choice = choices[0]
+                    finish_reason = getattr(choice, "finish_reason", None) or finish_reason
+                    delta = getattr(choice, "delta", {})
+
+                    if isinstance(delta, dict):
+                        content_chunk = delta.get("content") or ""
+                        reasoning_chunk = delta.get("reasoning_content") or ""
+                        tc_deltas = delta.get("tool_calls") or []
+                    else:
+                        content_chunk = getattr(delta, "content", "") or ""
+                        reasoning_chunk = getattr(delta, "reasoning_content", None) or ""
+                        tc_deltas = getattr(delta, "tool_calls", None) or []
+
+                    if reasoning_chunk:
+                        full_reasoning += reasoning_chunk
+                        yield ("reasoning", reasoning_chunk)
+
+                    if content_chunk:
+                        full_content += content_chunk
+                        yield ("content_delta", content_chunk)
+
+                    for tc_delta in tc_deltas:
+                        if isinstance(tc_delta, dict):
+                            idx = tc_delta.get("index", 0)
+                            tc_id = tc_delta.get("id")
+                            tc_type = tc_delta.get("type")
+                            fn = tc_delta.get("function") or {}
+                            fn_name = fn.get("name") or ""
+                            fn_args = fn.get("arguments") or ""
+                        else:
+                            idx = getattr(tc_delta, "index", 0)
+                            tc_id = getattr(tc_delta, "id", None)
+                            tc_type = getattr(tc_delta, "type", None)
+                            fn = getattr(tc_delta, "function", None)
+                            fn_name = (getattr(fn, "name", "") or "") if fn else ""
+                            fn_args = (getattr(fn, "arguments", "") or "") if fn else ""
+
+                        if idx not in tool_calls_acc:
+                            tool_calls_acc[idx] = {
+                                "id": "",
+                                "type": "function",
+                                "function": {"name": "", "arguments": ""},
+                            }
+                        if tc_id:
+                            tool_calls_acc[idx]["id"] = tc_id
+                        if tc_type:
+                            tool_calls_acc[idx]["type"] = tc_type
+                        if fn_name:
+                            tool_calls_acc[idx]["function"]["name"] += fn_name
+                        if fn_args:
+                            tool_calls_acc[idx]["function"]["arguments"] += fn_args
+
+                assembled_tool_calls = [
+                    tool_calls_acc[i] for i in sorted(tool_calls_acc.keys())
+                ]
+                if not finish_reason:
+                    finish_reason = "tool_calls" if assembled_tool_calls else "stop"
+
+                yield (
+                    "done",
+                    LLMResponse(
+                        content=full_content or None,
+                        tool_calls=assembled_tool_calls,
+                        reasoning_content=full_reasoning or None,
+                        thinking_blocks=None,
+                        finish_reason=finish_reason,
+                    ),
+                )
+                return
+
+            except Exception as e:
+                if attempt < max_retries:
+                    logger.warning(
+                        "LLM stream failed (attempt %d/%d): %s", attempt + 1, max_retries + 1, e
+                    )
+                    continue
+                logger.error("LLM stream failed after %d attempts: %s", max_retries + 1, e)
+                yield (
+                    "done",
+                    LLMResponse(content=f"Error calling LLM: {str(e)}", finish_reason="error"),
+                )
+                return
 
     async def chat(
         self,

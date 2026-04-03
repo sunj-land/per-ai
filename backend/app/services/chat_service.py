@@ -663,6 +663,7 @@ class ChatService:
             full_content = ""
             full_reasoning = ""
             assistant_extra = None
+            answer_streamed = False  # True once any answer_delta event is received
 
             # ── BP-6: routing options ──────────────────────────────
             selected_agent_id, selected_purpose, stage_progress_enabled = self._extract_send_options(extra)
@@ -686,7 +687,6 @@ class ChatService:
 
                 # ── BP-7: agent request built ──────────────────────
                 history_messages = self._build_agent_history_messages(messages)
-                self._dbp("BP-7:agent_history", history_count=len(history_messages))
 
                 query_request = AgentQueryRequestContract(
                     query=full_user_content,
@@ -698,96 +698,175 @@ class ChatService:
                         "purpose": selected_purpose,
                     },
                 )
-                query_task = asyncio.create_task(client.query(query_request))
-                wait_seconds = 0
-                try:
-                    while not query_task.done():
-                        await asyncio.sleep(0.35)
-                        wait_seconds += 0.35
-                    query_response = await query_task
-                except asyncio.CancelledError:
-                    if not query_task.done():
-                        query_task.cancel()
-                    raise
+                # ── BP-8: stream agent events in real time ────────
+                async for stream_event in client.query_stream(query_request):
+                    event_type = stream_event.get("event", "")
+                    event_data = stream_event.get("data", {})
 
-                # ── BP-9: agent response received ──────────────────
-                # Update selected_agent_id to reflect the agent that actually processed the request
-                selected_agent_id = query_response.source_agent or selected_agent_id
-                self._dbp(
-                    "BP-9:agent_response",
-                    wait_seconds=round(wait_seconds, 2),
-                    has_error=bool(query_response.error),
-                    answer_len=len(query_response.answer or ""),
-                    source_agent=query_response.source_agent,
-                    actual_agent_id=selected_agent_id,
-                    latency_ms=query_response.latency_ms,
-                    metadata_keys=list(query_response.metadata.keys()) if isinstance(query_response.metadata, dict) else None,
-                )
-                if query_response.error:
-                    yield json.dumps({"error": query_response.error}) + "\n"
-                    return
+                    if event_type == "status":
+                        # Progress / stage updates — forward as reasoning hints
+                        msg   = event_data.get("message", "")
+                        stage = event_data.get("stage", "")
+                        meta  = {
+                            "stream_stage": "status",
+                            "status_stage": stage,
+                        }
+                        if "iteration" in event_data:
+                            meta["iteration"] = event_data["iteration"]
+                        if "max_iterations" in event_data:
+                            meta["max_iterations"] = event_data["max_iterations"]
+                        if "llm_elapsed_ms" in event_data:
+                            meta["llm_elapsed_ms"] = event_data["llm_elapsed_ms"]
+                        if msg:
+                            yield json.dumps(
+                                {"reasoning": msg, "metadata": meta},
+                                ensure_ascii=False,
+                            ) + "\n"
 
-                full_content = query_response.answer or ""
-                reasoning_trace = []
-                routing_meta = {}
-                if isinstance(query_response.metadata, dict):
-                    routing_candidate = query_response.metadata.get("routing")
-                    if isinstance(routing_candidate, dict):
-                        routing_meta = routing_candidate
-                    trace_candidate = query_response.metadata.get("reasoning_trace")
-                    if isinstance(trace_candidate, list):
-                        reasoning_trace = [
-                            str(item).strip()
-                            for item in trace_candidate
-                            if isinstance(item, str) and str(item).strip()
-                        ]
-                assistant_extra = {
-                    "source_agent": selected_agent_id,
-                    "latency_ms": query_response.latency_ms,
-                    "routing": routing_meta,
-                }
+                    elif event_type == "routing":
+                        target = event_data.get("target_agent", selected_agent_id)
+                        source = event_data.get("source", "")
+                        conf   = event_data.get("confidence")
+                        purp   = event_data.get("purpose", "")
+                        label  = f"路由至 Agent：{target}"
+                        if source:
+                            label += f"（策略：{source}"
+                            if conf is not None:
+                                label += f"，置信度：{round(conf * 100)}%"
+                            if purp:
+                                label += f"，用途：{purp}"
+                            label += "）"
+                        yield json.dumps(
+                            {"reasoning": label, "metadata": {"stream_stage": "routing", "target_agent": target}},
+                            ensure_ascii=False,
+                        ) + "\n"
 
-                # Yield an agent-selected event so the frontend knows the actual agent
-                yield json.dumps(
-                    {
-                        "reasoning": f"已选择 Agent：{selected_agent_id}",
-                        "metadata": {
-                            **assistant_extra,
-                            "stream_stage": "agent_selected",
-                        },
-                    },
-                    ensure_ascii=False,
-                ) + "\n"
+                    elif event_type == "reasoning":
+                        content = event_data.get("content", "")
+                        step    = event_data.get("step")
+                        partial = event_data.get("partial", False)
+                        if content:
+                            # For streaming partial chunks, accumulate without separator;
+                            # for complete non-streaming blocks, add double-newline separator.
+                            if partial:
+                                full_reasoning += content
+                            else:
+                                full_reasoning += ("" if not full_reasoning else "\n\n") + content
+                            # Yield the chunk directly — no re-chunking for streaming partials
+                            yield json.dumps(
+                                {
+                                    "reasoning": content,
+                                    "metadata": {
+                                        "stream_stage": "reasoning",
+                                        "partial": partial,
+                                        **({"step": step} if step is not None else {}),
+                                    },
+                                },
+                                ensure_ascii=False,
+                            ) + "\n"
 
-                if reasoning_trace:
-                    reasoning_text = "\n\n".join(reasoning_trace)
-                    full_reasoning = reasoning_text
-                    reasoning_chunks = list(self._iter_text_chunks(reasoning_text, chunk_size=120))
-                    for reasoning_chunk in reasoning_chunks:
+                    elif event_type == "tool_call":
+                        name      = event_data.get("name", "")
+                        iteration = event_data.get("iteration")
+                        label     = f"调用工具：{name}"
+                        if iteration is not None:
+                            label += f"（第 {iteration} 步）"
                         yield json.dumps(
                             {
-                                "reasoning": reasoning_chunk,
+                                "reasoning": label,
                                 "metadata": {
-                                    **assistant_extra,
-                                    "stream_stage": "reasoning",
+                                    "stream_stage": "tool_call",
+                                    "tool": name,
+                                    **({"iteration": iteration} if iteration is not None else {}),
                                 },
                             },
                             ensure_ascii=False,
                         ) + "\n"
 
-                content_chunks = list(self._iter_text_chunks(full_content, chunk_size=120))
-                for content_chunk in content_chunks:
-                    yield json.dumps(
-                        {
-                            "content": content_chunk,
-                            "reasoning": "",
-                            "metadata": {
-                                **assistant_extra,
-                                "stream_stage": "final_answer",
+                    elif event_type == "tool_result":
+                        name        = event_data.get("name", "")
+                        elapsed_ms  = event_data.get("elapsed_ms")
+                        success     = event_data.get("success", True)
+                        status_text = "成功" if success else "失败"
+                        label       = f"工具 {name} 执行{status_text}"
+                        if elapsed_ms is not None:
+                            label += f"（耗时 {elapsed_ms} ms）"
+                        yield json.dumps(
+                            {
+                                "reasoning": label,
+                                "metadata": {
+                                    "stream_stage": "tool_result",
+                                    "tool": name,
+                                    "success": success,
+                                    **({"elapsed_ms": elapsed_ms} if elapsed_ms is not None else {}),
+                                },
                             },
-                        },
-                        ensure_ascii=False,
-                    ) + "\n"
+                            ensure_ascii=False,
+                        ) + "\n"
+
+                    elif event_type == "answer_delta":
+                        chunk = event_data.get("content", "")
+                        if chunk:
+                            full_content += chunk
+                            answer_streamed = True
+                            yield json.dumps(
+                                {
+                                    "content":  chunk,
+                                    "reasoning": "",
+                                    "metadata": {"stream_stage": "answer_delta"},
+                                },
+                                ensure_ascii=False,
+                            ) + "\n"
+
+                    elif event_type == "done":
+                        # ── BP-9: agent response received ─────────────
+                        selected_agent_id = event_data.get("source_agent") or selected_agent_id
+                        done_answer       = event_data.get("answer", "")
+                        # Use the done answer for persistence; content may already be
+                        # streamed token-by-token via answer_delta events.
+                        if not answer_streamed:
+                            full_content = done_answer
+                        latency_ms        = event_data.get("latency_ms", 0)
+                        meta              = event_data.get("metadata") or {}
+                        routing_meta      = meta.get("routing") if isinstance(meta, dict) else {}
+                        if not isinstance(routing_meta, dict):
+                            routing_meta = {}
+
+                        assistant_extra = {
+                            "source_agent":    selected_agent_id,
+                            "latency_ms":      latency_ms,
+                            "routing":         routing_meta,
+                            "iteration_count": meta.get("iteration_count", 0) if isinstance(meta, dict) else 0,
+                            "tools_used":      meta.get("tools_used", []) if isinstance(meta, dict) else [],
+                        }
+
+                        yield json.dumps(
+                            {
+                                "reasoning": (
+                                    f"推理完成 — 共 {assistant_extra['iteration_count']} 步，"
+                                    f"耗时 {round(latency_ms)} ms"
+                                ),
+                                "metadata": {**assistant_extra, "stream_stage": "agent_done"},
+                            },
+                            ensure_ascii=False,
+                        ) + "\n"
+
+                        # Only re-chunk if answer tokens were NOT already streamed via
+                        # answer_delta events.  If they were, avoid double-sending.
+                        if not answer_streamed:
+                            for content_chunk in self._iter_text_chunks(full_content, chunk_size=120):
+                                yield json.dumps(
+                                    {
+                                        "content":   content_chunk,
+                                        "reasoning": "",
+                                        "metadata":  {**assistant_extra, "stream_stage": "final_answer"},
+                                    },
+                                    ensure_ascii=False,
+                                ) + "\n"
+
+                    elif event_type == "error":
+                        yield json.dumps({"error": event_data.get("message", "Agent error")}) + "\n"
+                        break  # fall through to BP-11/BP-12 to persist partial content
             else:
                 # ── BP-7D: direct completion path ──────────────────
                 # NOTE: structurally unreachable — _extract_send_options always
@@ -840,6 +919,8 @@ class ChatService:
                 final_content = f"<think>\n{full_reasoning}\n</think>\n\n{full_content}"
 
             # ── BP-12: save assistant message (new session) ────────
+            if not final_content or not final_content.strip():
+                return  # nothing to persist (empty response)
             from app.core.database import engine as _engine
             with Session(_engine) as post_session:
                 assistant_msg = ChatMessage(session_id=session_id, role="assistant", content=final_content, extra=assistant_extra)

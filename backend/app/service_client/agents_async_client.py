@@ -33,7 +33,7 @@ class AgentsServiceAsyncClient:
         self.api_version = os.getenv("INTERNAL_API_VERSION", "v1")
         self.service_token = os.getenv("SERVICE_JWT_TOKEN", "change-me")
         self.api_key = os.getenv("AGENT_API_KEY", "default-insecure-key")
-        self.timeout = float(os.getenv("AGENTS_CLIENT_TIMEOUT_SECONDS", "60"))
+        self.timeout = float(os.getenv("AGENTS_CLIENT_TIMEOUT_SECONDS", "300"))
 
         # Shared limits
         self.limits = httpx.Limits(max_keepalive_connections=20, max_connections=100)
@@ -98,6 +98,35 @@ class AgentsServiceAsyncClient:
         )
         response.raise_for_status()
         return AgentQueryResponseContract.model_validate(response.json())
+
+    async def query_stream(self, payload: AgentQueryRequestContract) -> AsyncGenerator[Dict, None]:
+        """
+        Stream a query to the agents service.
+        Yields parsed NDJSON event dicts: {"event": "...", "data": {...}}
+        """
+        headers = self._build_headers()
+        try:
+            async with self.client.stream(
+                "POST",
+                "/api/v1/agents/query/stream",
+                json=payload.model_dump(mode="json"),
+                headers=headers,
+            ) as response:
+                if response.status_code != 200:
+                    await response.aread()
+                    yield {"event": "error", "data": {"message": f"HTTP {response.status_code}"}}
+                    return
+                async for line in response.aiter_lines():
+                    if line.strip():
+                        try:
+                            yield json.loads(line)
+                        except json.JSONDecodeError:
+                            logger.warning("Invalid JSON in agent stream: %s", line)
+        except httpx.HTTPStatusError as e:
+            yield {"event": "error", "data": {"message": f"HTTP {e.response.status_code}"}}
+        except Exception as e:
+            logger.error("Error streaming from agents service: %s", e)
+            yield {"event": "error", "data": {"message": str(e)}}
 
     async def close(self):
         await self.client.aclose()

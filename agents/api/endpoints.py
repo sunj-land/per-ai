@@ -1,8 +1,10 @@
 from datetime import date, datetime, UTC
+import json
 import os
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from core.master_agent import MasterAgent
 from core.protocol import AgentRequest, AgentResponse
 from core.conversation_logger import conversation_logger
@@ -125,6 +127,32 @@ async def query_agent(request: AgentRequest, _: None = Depends(verify_service_au
     except Exception as e:
         logger.error(f"Agent query failed: {e}")
         raise HTTPException(status_code=500, detail=_error_payload(code="AGENT_QUERY_FAILED", message=str(e)))
+
+@router.post("/query/stream", summary="Stream Query the Master Agent")
+async def query_agent_stream(request: AgentRequest, _: None = Depends(verify_service_auth)):
+    """
+    Stream a query to the Master Agent as NDJSON.
+    Each line is a JSON object with {"event": "...", "data": {...}}.
+    Events: routing | reasoning | tool_call | done | error
+    """
+    async def _generate():
+        try:
+            async for event in master_agent.process_request_stream(request):
+                yield json.dumps(event, ensure_ascii=False) + "\n"
+        except Exception as e:
+            logger.error("Streaming agent query failed: %s", e)
+            yield json.dumps({"event": "error", "data": {"message": str(e)}}, ensure_ascii=False) + "\n"
+
+    return StreamingResponse(
+        _generate(),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache, no-store",
+            "X-Accel-Buffering": "no",   # disable nginx buffering
+            "Transfer-Encoding": "chunked",
+        },
+    )
+
 
 @router.get("/status", summary="Get Agent System Status")
 def get_status(_: None = Depends(verify_service_auth)):
