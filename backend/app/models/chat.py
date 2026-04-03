@@ -27,10 +27,10 @@ class ChatSession(ChatSessionBase, table=True):
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True, description="会话全局唯一ID，主键，默认自动生成UUID")
 
     # 创建时间：记录会话发起的 UTC 时间
-    created_at: datetime = Field(default_factory=datetime.utcnow, description="会话创建时间，UTC时间，默认当前时间")
+    created_at: datetime = Field(default_factory=lambda: datetime.now(datetime.timezone.utc), description="会话创建时间，UTC时间，默认当前时间")
 
     # 更新时间：记录会话最后一次发生交互的时间
-    updated_at: datetime = Field(default_factory=datetime.utcnow, description="会话最后更新时间，UTC时间，默认当前时间")
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(datetime.timezone.utc), description="会话最后更新时间，UTC时间，默认当前时间")
 
     # 一对多关系映射：当前会话包含的所有消息列表，级联删除
     messages: List["ChatMessage"] = Relationship(back_populates="session", sa_relationship_kwargs={"cascade": "all, delete-orphan"})

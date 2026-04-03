@@ -171,23 +171,6 @@ class ChatService:
             return f"ollama/{normalized}"
         return normalized
 
-    # ------------------------------------------------------------------
-    # Debug breakpoint helper
-    # ------------------------------------------------------------------
-    def _dbp(self, tag: str, **fields) -> None:
-        """Emit a structured DEBUG log line for a named breakpoint.
-
-        Enable with LOG_LEVEL=DEBUG (or logger.setLevel(logging.DEBUG)).
-        Each call produces one log line so grep/jq can filter per tag.
-
-        Usage::
-            self._dbp("BP-2", images_count=3, context_bytes=512)
-        """
-        if not logger.isEnabledFor(logging.DEBUG):
-            return
-        parts = " ".join(f"{k}={v!r}" for k, v in fields.items())
-        logger.debug("[send_message:%s] %s", tag, parts)
-
     def _iter_text_chunks(self, text: str, chunk_size: int = 120) -> Generator[str, None, None]:
         normalized_text = str(text or "")
         if not normalized_text:
@@ -250,6 +233,7 @@ class ChatService:
         extra: Optional[dict],
         user_msg_id: Any,
         full_user_content: str,
+        user_id: Optional[int] = None,
     ) -> list:
         """
         Build the ordered messages list that will be sent to the AI provider.
@@ -257,6 +241,14 @@ class ChatService:
         Injects an optional user-profile system message, then appends the
         conversation history (substituting the full content for the current
         user message).
+
+        Args:
+            session: 数据库会话
+            session_id: 会话ID
+            extra: 额外参数
+            user_msg_id: 用户消息ID
+            full_user_content: 完整的用户消息内容
+            user_id: 用户ID，可选，用于获取用户个性化配置
 
         Returns:
             List of message dicts with keys: role, content, images.
@@ -267,18 +259,20 @@ class ChatService:
 
         messages: list = []
 
-        try:
-            user_profile = user_profile_service.get_profile(session)
-            if user_profile.identity or user_profile.rules:
-                profile_prompt = "User Profile Context:\n"
-                if user_profile.identity:
-                    profile_prompt += f"Soul Identity: {user_profile.identity}\n"
-                if user_profile.rules:
-                    profile_prompt += f"Personal Rules: {user_profile.rules}\n"
-                profile_prompt += "Please tailor your response based on this context."
-                messages.append({"role": "system", "content": profile_prompt})
-        except Exception as e:
-            logger.error(f"Failed to inject user profile: {e}")
+        # ========== 注入用户个性化配置 ==========
+        if user_id:
+            try:
+                user_profile = user_profile_service.get_profile(session, user_id)
+                if user_profile.identity or user_profile.rules:
+                    profile_prompt = "User Profile Context:\n"
+                    if user_profile.identity:
+                        profile_prompt += f"Soul Identity: {user_profile.identity}\n"
+                    if user_profile.rules:
+                        profile_prompt += f"Personal Rules: {user_profile.rules}\n"
+                    profile_prompt += "Please tailor your response based on this context."
+                    messages.append({"role": "system", "content": profile_prompt})
+            except Exception as e:
+                logger.error(f"Failed to inject user profile: {e}")
 
         for msg in history:
             msg_content = msg.get("content", "")
@@ -602,6 +596,9 @@ class ChatService:
         if not chat_session:
             raise ValueError("Session not found")
 
+        # 获取用户ID，用于个性化配置
+        user_id = chat_session.user_id
+
         # ── BP-2: attachment processing ────────────────────────────
         processed_images, attachment_context = await self._process_attachments(session, images, attachments)
         full_user_content = content + attachment_context
@@ -649,15 +646,9 @@ class ChatService:
         try:
             # ── BP-5: message context built ────────────────────────
             messages = self._build_message_context(
-                session, session_id, extra, user_msg.id, full_user_content
+                session, session_id, extra, user_msg.id, full_user_content, user_id
             )
             has_profile_msg = bool(messages and messages[0].get("role") == "system")
-            self._dbp(
-                "BP-5:message_context",
-                total_messages=len(messages),
-                has_profile_system_msg=has_profile_msg,
-                ignore_history=bool(extra and extra.get("ignore_history")),
-            )
 
             normalized_model_id = self._normalize_model_id(model_id)
             full_content = ""
@@ -667,13 +658,6 @@ class ChatService:
 
             # ── BP-6: routing options ──────────────────────────────
             selected_agent_id, selected_purpose, stage_progress_enabled = self._extract_send_options(extra)
-            self._dbp(
-                "BP-6:send_options",
-                agent_id=selected_agent_id,
-                purpose=selected_purpose,
-                stage_progress_enabled=stage_progress_enabled,
-                route="agent" if (selected_agent_id or selected_purpose) else "direct",
-            )
 
             # selected_agent_id默认值会一直是MasterAgent
             if selected_agent_id or selected_purpose:
@@ -871,7 +855,6 @@ class ChatService:
                 # ── BP-7D: direct completion path ──────────────────
                 # NOTE: structurally unreachable — _extract_send_options always
                 # returns "MasterAgent" as default agent_id.
-                self._dbp("BP-7D:direct_path", model=normalized_model_id)
                 request_contract = ChatCompletionRequestContract(
                     messages=messages,
                     model=normalized_model_id,

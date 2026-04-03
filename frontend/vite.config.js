@@ -42,13 +42,13 @@ export default defineConfig({
 	},
 	server: {
 		proxy: {
-			"/agents-api": {
-				target: "http://localhost:8001",
-				changeOrigin: true,
-				rewrite: (path) => path.replace(/^\/agents-api/, "/api"),
-				timeout: 300000,
-				proxyTimeout: 300000,
-			},
+			// "/agents-api": {
+			// 	target: "http://localhost:8001",
+			// 	changeOrigin: true,
+			// 	rewrite: (path) => path.replace(/^\/agents-api/, "/api"),
+			// 	timeout: 300000,
+			// 	proxyTimeout: 300000,
+			// },
 			"/api": {
 				target: "http://localhost:8000",
 				changeOrigin: true,
